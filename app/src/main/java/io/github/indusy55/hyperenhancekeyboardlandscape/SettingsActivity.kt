@@ -1,4 +1,4 @@
-package com.hyperenhance.keyboardlandscape
+package io.github.indusy55.hyperenhancekeyboardlandscape
 
 import android.os.Bundle
 import android.provider.Settings

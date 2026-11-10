@@ -28,16 +28,16 @@ val keyPasswordValue = System.getenv("KEY_PASSWORD")
     ?: storePasswordValue
 
 android {
-    namespace = "com.hyperenhance.keyboardlandscape"
+    namespace = "io.github.indusy55.hyperenhancekeyboardlandscape"
     compileSdk = 35
     buildToolsVersion = "34.0.0"
 
     defaultConfig {
-        applicationId = "com.hyperenhance.keyboardlandscape"
+        applicationId = "io.github.indusy55.hyperenhancekeyboardlandscape"
         minSdk = 29
         targetSdk = 34
         versionCode = 1
-        versionName = "1.0"
+        versionName = "1.0.0"
     }
 
     signingConfigs {

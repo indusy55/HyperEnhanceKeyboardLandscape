@@ -1,4 +1,4 @@
-package com.hyperenhance.keyboardlandscape
+package io.github.indusy55.hyperenhancekeyboardlandscape
 
 import android.app.Application
 import io.github.libxposed.service.XposedService
