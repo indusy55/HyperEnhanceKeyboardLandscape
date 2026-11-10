@@ -1,32 +1,31 @@
 package com.hyperenhance.keyboardlandscape;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.content.res.Configuration;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
+import android.view.View;
+import android.view.ViewGroup;
 
+import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.libxposed.api.XposedInterface;
 import io.github.libxposed.api.XposedModule;
 import io.github.libxposed.api.XposedModuleInterface;
 
 /**
- * 小米「全面屏键盘优化」的横屏开关（Vector / libxposed 102 模块）。
+ * 小米「全面屏键盘优化」横屏开关（Vector / libxposed 102 模块）。
  *
- * <p>键盘底部的功能条（剪贴板 / 切换输入法 / 小爱）由小米系统组件
- * {@code com.miui.inputmethod.InputMethodBottomManager} 绘制。该组件位于
+ * <p>底栏由 {@code com.miui.inputmethod.InputMethodBottomManager} 绘制，该类位于
  * MIUIFrequentPhrase.apk，由 {@code InputMethodServiceInjector} 通过
- * {@code InputMethodModuleManager.loadDex()} 加载进当前输入法进程。
+ * {@code InputMethodModuleManager.loadDex()} 加载进输入法进程。
  *
- * <p>其 {@code addMiuiBottomView(...)} 在 {@code Configuration.orientation ==
- * ORIENTATION_LANDSCAPE} 时直接 return：不创建底栏、不注册观察者，并把
- * {@code InputMethodUtil.sCanShowMiuiBottom} 置为 false。因此横屏下功能完全失效。
- *
- * <p>本模块不触碰任何输入法自己的类。它只 hook 小米框架里的
- * {@code InputMethodServiceInjector#reflectModule}，在它即将反射调用
- * {@code addMiuiBottomView} 时，把一个 Configuration 被覆盖为竖屏的 Context
- * 换进参数。原方法随后的竖屏分支即为完整可用的实现。
+ * <p>{@code addMiuiBottomView(...)} 在横屏直接 return。本模块把
+ * {@code reflectModule} 的 Context 参数换成竖屏 Configuration Context，让原方法
+ * 走完整竖屏实现。开关关闭时不做任何替换。
  */
 public final class ModuleEntry extends XposedModule {
 
@@ -37,18 +36,36 @@ public final class ModuleEntry extends XposedModule {
             "com.miui.inputmethod.InputMethodBottomManager";
     private static final String ADD_BOTTOM_VIEW = "addMiuiBottomView";
     private static final String REFLECT_MODULE = "reflectModule";
+    private static final String CHANGE_BOTTOM_VIEW = "changeViewForMiuiBottom";
 
-    private static final AtomicBoolean INSTALLED = new AtomicBoolean(false);
+    private boolean installed;
+    private boolean visibilityHookInstalled;
+    private boolean landscapeEnabled = true;
+    private SharedPreferences prefs;
+    private Field helperField;
+    private Field areaField;
+
+    @Override
+    public boolean onHotReloading(XposedModuleInterface.HotReloadingParam param) {
+        return true;
+    }
+
+    @Override
+    public void onHotReloaded(XposedModuleInterface.HotReloadedParam param) {
+        // Keep the existing hooks: package callbacks are not replayed after hot reload.
+    }
 
     @Override
     public void onPackageLoaded(XposedModuleInterface.PackageLoadedParam param) {
-        if (!param.isFirstPackage() || !INSTALLED.compareAndSet(false, true)) {
+        if (!param.isFirstPackage() || installed) {
             return;
         }
+        installed = true;
         try {
             ClassLoader loader = param.getDefaultClassLoader();
             Class<?> injector = Class.forName(INJECTOR_CLASS, false, loader);
-            Method target = findReflectModule(injector);
+            Method target = findMethod(injector, REFLECT_MODULE,
+                    String.class, String.class, Class[].class, Object[].class);
             if (target == null) {
                 log(Log.WARN, TAG, REFLECT_MODULE + " not found in " + INJECTOR_CLASS);
                 return;
@@ -57,47 +74,51 @@ public final class ModuleEntry extends XposedModule {
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept(chain -> {
                         Object[] args = chain.getArgs().toArray();
-                        if (forcePortraitContext(args)) {
-                            return chain.proceed(args);
+                        boolean changed = forcePortraitContext(args);
+                        Object result = changed ? chain.proceed(args) : chain.proceed();
+                        if (isAddBottomView(args)) {
+                            Context moduleContext = contextOf(args);
+                            if (moduleContext != null) {
+                                installVisibilityHook(moduleContext.getClassLoader());
+                                applyBarVisibility();
+                            }
                         }
-                        return chain.proceed();
+                        return result;
                     });
+            loadPreferences();
             log(Log.INFO, TAG, "hooked " + INJECTOR_CLASS + "#" + REFLECT_MODULE);
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "inactive: " + t, t);
         }
     }
 
-    private static Method findReflectModule(Class<?> injector) {
-        for (Method method : injector.getDeclaredMethods()) {
-            if (!REFLECT_MODULE.equals(method.getName())) {
-                continue;
-            }
-            Class<?>[] types = method.getParameterTypes();
-            if (types.length == 4
-                    && types[0] == String.class
-                    && types[1] == String.class
-                    && types[2] == Class[].class
-                    && types[3] == Object[].class) {
-                return method;
-            }
+    private static Method findMethod(Class<?> type, String name, Class<?>... parameterTypes) {
+        try {
+            Method method = type.getDeclaredMethod(name, parameterTypes);
+            method.setAccessible(true);
+            return method;
+        } catch (Throwable ignored) {
+            return null;
         }
-        return null;
     }
 
-    /**
-     * {@code reflectModule(className, methodName, parameterTypes, values...)}:
-     * values[0] 是传给 {@code addMiuiBottomView} 的 Context（com.miui.phrase 的
-     * package context）。换成竖屏配置的 context 后，原方法走完整的竖屏实现。
-     *
-     * @return true when the argument array was changed and must be proceeded with
-     */
+    private static Context contextOf(Object[] args) {
+        if (args.length != 4 || !(args[3] instanceof Object[])) {
+            return null;
+        }
+        Object[] values = (Object[]) args[3];
+        return values.length > 0 && values[0] instanceof Context ? (Context) values[0] : null;
+    }
+
+    private static boolean isAddBottomView(Object[] args) {
+        return args.length == 4
+                && BOTTOM_MANAGER_CLASS.equals(args[0])
+                && ADD_BOTTOM_VIEW.equals(args[1]);
+    }
+
     private boolean forcePortraitContext(Object[] args) {
         try {
-            if (args.length != 4
-                    || !BOTTOM_MANAGER_CLASS.equals(args[0])
-                    || !ADD_BOTTOM_VIEW.equals(args[1])
-                    || !(args[3] instanceof Object[])) {
+            if (!isAddBottomView(args)) {
                 return false;
             }
             Object[] values = (Object[]) args[3];
@@ -123,6 +144,88 @@ public final class ModuleEntry extends XposedModule {
         } catch (Throwable t) {
             log(Log.ERROR, TAG, "forcePortraitContext failed: " + t, t);
             return false;
+        }
+    }
+
+    private boolean isLandscapeEnabled() {
+        return prefs == null || prefs.getBoolean(SettingsKeys.LANDSCAPE_ENABLED, true);
+    }
+
+    private void installVisibilityHook(ClassLoader loader) {
+        if (visibilityHookInstalled || loader == null) {
+            return;
+        }
+        synchronized (this) {
+            if (visibilityHookInstalled) {
+                return;
+            }
+            try {
+                Class<?> manager = Class.forName(BOTTOM_MANAGER_CLASS, true, loader);
+                helperField = manager.getDeclaredField("sBottomViewHelper");
+                helperField.setAccessible(true);
+                areaField = helperField.getType().getDeclaredField("mMiuiBottomArea");
+                areaField.setAccessible(true);
+                Method target = findMethod(manager, CHANGE_BOTTOM_VIEW, ViewGroup.class, Context.class);
+                if (target == null) {
+                    log(Log.WARN, TAG, CHANGE_BOTTOM_VIEW + " not found");
+                    return;
+                }
+                hook(target)
+                        .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
+                        .intercept(chain -> {
+                            Object result = chain.proceed();
+                            applyBarVisibility();
+                            return result;
+                        });
+                visibilityHookInstalled = true;
+                log(Log.INFO, TAG, "hooked " + BOTTOM_MANAGER_CLASS + "#" + CHANGE_BOTTOM_VIEW);
+            } catch (Throwable t) {
+                log(Log.WARN, TAG, "visibility hook failed: " + t, t);
+            }
+        }
+    }
+
+    private void applyBarVisibility() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            new Handler(Looper.getMainLooper()).post(this::applyBarVisibility);
+            return;
+        }
+        try {
+            if (helperField == null || areaField == null) {
+                return;
+            }
+            Object helper = helperField.get(null);
+            if (helper == null) {
+                return;
+            }
+            ViewGroup area = (ViewGroup) areaField.get(helper);
+            if (area == null) {
+                return;
+            }
+            boolean enabled = isLandscapeEnabled();
+            int target = enabled ? View.VISIBLE : View.GONE;
+            if (area.getVisibility() != target) {
+                area.setVisibility(target);
+                area.requestLayout();
+                log(Log.INFO, TAG, "bar " + (enabled ? "shown" : "hidden"));
+            }
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "applyBarVisibility failed: " + t, t);
+        }
+    }
+
+    private void loadPreferences() {
+        try {
+            prefs = getRemotePreferences(SettingsKeys.PREFS_GROUP);
+            landscapeEnabled = prefs.getBoolean(SettingsKeys.LANDSCAPE_ENABLED, true);
+            prefs.registerOnSharedPreferenceChangeListener((p, key) -> {
+                if (SettingsKeys.LANDSCAPE_ENABLED.equals(key)) {
+                    landscapeEnabled = p.getBoolean(SettingsKeys.LANDSCAPE_ENABLED, true);
+                    applyBarVisibility();
+                }
+            });
+        } catch (Throwable t) {
+            log(Log.WARN, TAG, "remote preferences unavailable: " + t, t);
         }
     }
 }
