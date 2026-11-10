@@ -41,6 +41,9 @@ class ModuleEntry : XposedModule() {
     private var helperField: Field? = null
     private var areaField: Field? = null
 
+    @Volatile
+    private var nativeBarHeightPx = 0
+
     override fun onHotReloading(param: XposedModuleInterface.HotReloadingParam): Boolean = true
 
     override fun onHotReloaded(param: XposedModuleInterface.HotReloadedParam) {
@@ -146,7 +149,16 @@ class ModuleEntry : XposedModule() {
                 hook(target)
                     .setExceptionMode(XposedInterface.ExceptionMode.PROTECTIVE)
                     .intercept { chain ->
+                        val args = chain.args.toTypedArray()
+                        val area = args.getOrNull(0) as? ViewGroup
+                        val context = args.getOrNull(1) as? Context
+                        if (area != null && context != null) {
+                            lockBottomAreaHeight(area, context)
+                        }
                         val result = chain.proceed()
+                        if (area != null && context != null) {
+                            lockBottomAreaHeight(area, context)
+                        }
                         applyBarVisibility()
                         result
                     }
@@ -155,6 +167,58 @@ class ModuleEntry : XposedModule() {
             } catch (t: Throwable) {
                 log(Log.WARN, TAG, "visibility hook failed: $t", t)
             }
+        }
+    }
+
+    private fun lockBottomAreaHeight(area: ViewGroup, context: Context) {
+        try {
+            val height = resolveNativeBarHeight(area, context)
+            if (height <= 0) return
+            val areaParams = area.layoutParams
+            if (areaParams != null && areaParams.height != height) {
+                areaParams.height = height
+                area.setLayoutParams(areaParams)
+            }
+            val bar = area.getChildAt(0) ?: return
+            val barParams = bar.layoutParams
+            if (barParams != null && barParams.height != height) {
+                barParams.height = height
+                bar.setLayoutParams(barParams)
+            }
+        } catch (t: Throwable) {
+            log(Log.WARN, TAG, "lockBottomAreaHeight failed: $t", t)
+        }
+    }
+
+    private fun resolveNativeBarHeight(area: ViewGroup, context: Context): Int {
+        nativeBarHeightPx.takeIf { it > 0 }?.let { return it }
+        synchronized(this) {
+            if (nativeBarHeightPx > 0) return nativeBarHeightPx
+            val bar = area.getChildAt(0) ?: return 0
+            val resources = bar.resources
+            val packages = arrayOf("com.miui.phrase", context.packageName, "miuix.animation")
+            for (pkg in packages.distinct()) {
+                for (name in arrayOf("input_bottom_height", "input_bottom_low_height")) {
+                    val id = try {
+                        resources.getIdentifier(name, "dimen", pkg)
+                    } catch (_: Throwable) {
+                        0
+                    }
+                    if (id == 0) continue
+                    val px = try {
+                        resources.getDimensionPixelSize(id)
+                    } catch (_: Throwable) {
+                        0
+                    }
+                    if (px > 0) {
+                        nativeBarHeightPx = px
+                        log(Log.INFO, TAG, "native bar height ${px}px from $pkg:$name")
+                        return px
+                    }
+                }
+            }
+            log(Log.WARN, TAG, "native bar height resource not found; keeping original height")
+            return 0
         }
     }
 
