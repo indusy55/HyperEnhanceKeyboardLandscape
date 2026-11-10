@@ -203,14 +203,15 @@ private fun SettingsScreen() {
 
 @Composable
 private fun StatusCard(status: Status, onClick: () -> Unit) {
+    val dark = isSystemInDarkTheme()
     val color = when (status) {
-        Status.ACTIVE -> Color(0xFF34C759)
-        Status.INACTIVE -> Color(0xFFFF453A)
+        Status.ACTIVE -> if (dark) Color(0xFF34C759) else Color(0xFF1D9E48)
+        Status.INACTIVE -> if (dark) Color(0xFFFF453A) else Color(0xFFD70015)
         Status.UNKNOWN -> MiuixTheme.colorScheme.onSurfaceVariantSummary
     }
     val background = when (status) {
-        Status.ACTIVE -> Color(0xFF12281B)
-        Status.INACTIVE -> Color(0xFF2A1313)
+        Status.ACTIVE -> if (dark) Color(0xFF12281B) else Color(0xFFE8F7EC)
+        Status.INACTIVE -> if (dark) Color(0xFF2A1313) else Color(0xFFFDEBEA)
         Status.UNKNOWN -> MiuixTheme.colorScheme.surfaceContainer
     }
     val icon = when (status) {
