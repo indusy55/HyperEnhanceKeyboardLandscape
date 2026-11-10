@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <application
+        android:allowBackup="false"
+        android:label="HyperEnhanceKeyboardLandscape"
+        android:supportsRtl="true">
+
+        <meta-data
+            android:name="xposedmodule"
+            android:value="true" />
+        <meta-data
+            android:name="xposeddescription"
+            android:value="在横屏下启用小米「全面屏键盘优化」。不针对任何特定输入法。" />
+        <meta-data
+            android:name="xposedminversion"
+            android:value="101" />
+    </application>
+</manifest>
